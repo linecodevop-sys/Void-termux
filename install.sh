@@ -63,31 +63,38 @@ else
   fi
 fi
 
-# ---------- 4. Build the in-container setup script ----------
-# This runs INSIDE the Void Linux container via `proot-distro run -- /bin/sh -c`,
-# because a fresh image only has /bin/sh (no bash yet). This script installs bash
-# itself, but the script body here must stay POSIX-sh compatible (no `pipefail`,
-# no bashisms) since /bin/sh is what executes it.
-VOID_SETUP_SCRIPT='
+# ---------- 4. Build the in-container setup scripts ----------
+# Step A runs via /bin/sh (the only shell a fresh image has) and ONLY installs
+# bash + base packages. Must stay strict POSIX-sh (no bashisms).
+BOOTSTRAP_SCRIPT='
 set -u
-
 echo "[*] Updating xbps and base system..."
 xbps-install -Sy xbps >/dev/null 2>&1
 xbps-install -Suy >/dev/null 2>&1
-
 echo "[*] Installing base packages (bash, curl, git, github-cli, vim, nano, wget, libatomic)..."
 xbps-install -y bash curl git github-cli wget vim nano libatomic ca-certificates >/dev/null 2>&1
+echo "[OK] Base packages installed."
+'
 
-# --- bashrc setup ---
+# Step B runs via /bin/bash (now installed by Step A). nvm REQUIRES bash to be
+# sourced (it uses bash-only syntax), so this entire block must run under bash,
+# not sh. Heredocs use UNQUOTED delimiters here on purpose so that \xXX byte
+# escapes in the prompt string are interpreted by the shell at write-time
+# (printf) rather than written literally.
+VOID_SETUP_SCRIPT='
+set -u
 BASHRC="/root/.bashrc"
 touch "$BASHRC"
 
-# Colored two-line prompt (idempotent: remove old block first)
+# Colored two-line prompt (idempotent). Uses a quoted heredoc so backslash
+# sequences (\[ \033 \u \w etc.) are written literally for bash to interpret
+# later when the prompt is drawn. ASCII-only arrows (->  `-) are used instead
+# of Unicode glyphs to avoid encoding issues across different shells/locales.
 if ! grep -q "Custom prompt" "$BASHRC" 2>/dev/null; then
   cat >> "$BASHRC" << "PROMPT_EOF"
 
 # Custom prompt
-PS1="\[\033[1;35m\][\[\033[1;36m\]keyreyla\[\033[1;35m\]] \[\033[1;32m\]\u\[\033[0m\]@\[\033[1;33m\]localhost\[\033[0m\] \[\033[1;34m\]\xe2\x9e\x9c\[\033[0m\]  \[\033[1;36m\]\w\[\033[0m\]\n\[\033[1;35m\]\xe2\x95\xb0\xe2\x94\x80\xe2\x9d\xaf\[\033[0m\] "
+PS1="\[\033[1;35m\][\[\033[1;36m\]keyreyla\[\033[1;35m\]] \[\033[1;32m\]\u\[\033[0m\]@\[\033[1;33m\]localhost\[\033[0m\] \[\033[1;34m\]->\[\033[0m\]  \[\033[1;36m\]\w\[\033[0m\]\n\[\033[1;35m\]\`-\[\033[0m\] "
 PROMPT_EOF
 fi
 
@@ -106,7 +113,6 @@ NVM_EOF
 fi
 
 export NVM_DIR="/root/.nvm"
-# shellcheck disable=SC1091
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 
 echo "[*] Installing Node.js 26 via nvm (this may take a moment)..."
@@ -117,8 +123,7 @@ nvm use 26 >/dev/null 2>&1
 echo "[*] Installing pnpm..."
 npm install -g pnpm >/dev/null 2>&1
 
-PNPM_BIN="/root/.local/share/pnpm/bin"
-mkdir -p "$PNPM_BIN"
+mkdir -p "/root/.local/share/pnpm/bin"
 if ! grep -q "PNPM_HOME" "$BASHRC" 2>/dev/null; then
   cat >> "$BASHRC" << "PNPM_EOF"
 
@@ -138,14 +143,16 @@ echo "[OK] pnpm: $(pnpm --version 2>/dev/null)"
 echo "[OK] tsc:  $(tsc --version 2>/dev/null)"
 '
 
-# ---------- 5. Run the setup script inside the container ----------
-# NOTE: a freshly-installed void-glibc-full image has NO bash yet (only /bin/sh),
-# and it defines its own Entrypoint/Cmd, so `proot-distro login -- /bin/bash` fails
-# until bash is installed. We must bootstrap with `proot-distro run` (uses /bin/sh)
-# first; the setup script itself installs bash, and all FUTURE logins can then use
-# `proot-distro login -- /bin/bash` safely (that's what the `void` alias does).
-info "Configuring Void Linux (Node 26, pnpm, typescript, tsx, eslint, prompt)..."
-proot-distro run "$DISTRO_ALIAS" -- /bin/sh -c "$VOID_SETUP_SCRIPT"
+# ---------- 5. Run bootstrap (sh) then main setup (bash) ----------
+# A freshly-installed void-glibc-full image has NO bash yet (only /bin/sh), and
+# it defines its own Entrypoint/Cmd, so `proot-distro login -- /bin/bash` fails
+# until bash is installed. Step A bootstraps bash via /bin/sh; Step B then runs
+# everything else (nvm, pnpm, prompt) via /bin/bash, since nvm requires bash.
+info "Installing base packages (bash, git, curl, etc.)..."
+proot-distro run "$DISTRO_ALIAS" -- /bin/sh -c "$BOOTSTRAP_SCRIPT"
+
+info "Configuring Node 26, pnpm, typescript, tsx, eslint, and prompt..."
+proot-distro run "$DISTRO_ALIAS" -- /bin/bash -c "$VOID_SETUP_SCRIPT"
 
 if [ $? -ne 0 ]; then
   warn "Some steps inside the container may have failed. Check the output above."
