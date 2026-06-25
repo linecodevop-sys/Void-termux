@@ -64,9 +64,12 @@ else
 fi
 
 # ---------- 4. Build the in-container setup script ----------
-# This runs INSIDE the Void Linux container via `proot-distro login -- bash -c`.
+# This runs INSIDE the Void Linux container via `proot-distro run -- /bin/sh -c`,
+# because a fresh image only has /bin/sh (no bash yet). This script installs bash
+# itself, but the script body here must stay POSIX-sh compatible (no `pipefail`,
+# no bashisms) since /bin/sh is what executes it.
 VOID_SETUP_SCRIPT='
-set -uo pipefail
+set -u
 
 echo "[*] Updating xbps and base system..."
 xbps-install -Sy xbps >/dev/null 2>&1
@@ -136,8 +139,13 @@ echo "[OK] tsc:  $(tsc --version 2>/dev/null)"
 '
 
 # ---------- 5. Run the setup script inside the container ----------
+# NOTE: a freshly-installed void-glibc-full image has NO bash yet (only /bin/sh),
+# and it defines its own Entrypoint/Cmd, so `proot-distro login -- /bin/bash` fails
+# until bash is installed. We must bootstrap with `proot-distro run` (uses /bin/sh)
+# first; the setup script itself installs bash, and all FUTURE logins can then use
+# `proot-distro login -- /bin/bash` safely (that's what the `void` alias does).
 info "Configuring Void Linux (Node 26, pnpm, typescript, tsx, eslint, prompt)..."
-proot-distro login "$DISTRO_ALIAS" -- /bin/bash -c "$VOID_SETUP_SCRIPT"
+proot-distro run "$DISTRO_ALIAS" -- /bin/sh -c "$VOID_SETUP_SCRIPT"
 
 if [ $? -ne 0 ]; then
   warn "Some steps inside the container may have failed. Check the output above."
